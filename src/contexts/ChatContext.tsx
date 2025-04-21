@@ -38,14 +38,30 @@ type ChatContextType = {
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
+// Create a static store for all messages that persists across sessions
+// This simulates a server database but keeps it in memory
+const globalMessageStore: Record<string, ChatMessage[]> = {
+  general: [
+    {
+      id: 'welcome',
+      text: 'Welcome to the chat! Messages are now persistent across sessions.',
+      sender: 'system',
+      room: 'general',
+      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    }
+  ],
+  support: [],
+  random: []
+};
+
 // Mock WebSocket URL - Replace with your actual WebSocket server URL in production
 const WS_URL = "wss://echo.websocket.org"; // Example for testing
 
 export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [websocket, setWebsocket] = useState<WebSocketService | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  // Store messages per room
-  const [roomMessages, setRoomMessages] = useState<Record<string, ChatMessage[]>>({});
+  // Store messages per room, but initialize with our global store
+  const [roomMessages, setRoomMessages] = useState<Record<string, ChatMessage[]>>(globalMessageStore);
   const [rooms, setRooms] = useState<Room[]>([
     { id: "general", name: "General", users: 5 },
     { id: "support", name: "Support", users: 2 },
@@ -102,21 +118,27 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const handleIncomingMessage = (data: any) => {
     // Simulate receiving messages per room
     if (data.type === "chat_message" && data.room) {
+      // Update our local state
       setRoomMessages((prev) => {
         const prevMsgs = prev[data.room] || [];
+        const newMessages = [
+          ...prevMsgs,
+          {
+            id: Date.now(),
+            text: data.text,
+            sender: data.sender,
+            room: data.room,
+            timestamp: data.timestamp,
+            isFormattedText: data.isFormattedText
+          }
+        ];
+        
+        // Also update our global store so it persists
+        globalMessageStore[data.room] = newMessages;
+        
         return {
           ...prev,
-          [data.room]: [
-            ...prevMsgs,
-            {
-              id: Date.now(),
-              text: data.text,
-              sender: data.sender,
-              room: data.room,
-              timestamp: data.timestamp,
-              isFormattedText: data.isFormattedText
-            }
-          ]
+          [data.room]: newMessages
         };
       });
     } else if (data.type === "room_update") {
@@ -129,17 +151,32 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (username.trim()) {
       const userId = `user_${Date.now()}`;
       setCurrentUser({ id: userId, username });
-      // Add welcome message to "general" history
-      setRoomMessages((prev) => ({
-        ...prev,
-        general: [{
+      
+      // Don't add welcome message again if it already exists in the global store
+      if (!globalMessageStore.general.some(msg => 
+          msg.text.includes(`Welcome to the chat, ${username}!`))) {
+        // Add welcome message to "general" history
+        const welcomeMsg = {
           id: Date.now(),
           text: `Welcome to the chat, ${username}!`,
           sender: "system",
           room: "general",
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-        }]
-      }));
+        };
+        
+        globalMessageStore.general.push(welcomeMsg);
+        setRoomMessages(prev => ({
+          ...prev,
+          general: [...globalMessageStore.general]
+        }));
+      } else {
+        // Make sure our local state is synced with global store
+        setRoomMessages(prev => ({
+          ...prev,
+          general: [...globalMessageStore.general]
+        }));
+      }
+      
       // Auto-join general room
       joinRoom("general");
     }
@@ -150,20 +187,23 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const room = rooms.find(r => r.id === roomId);
     if (room && currentUser) {
       setCurrentRoom(room);
-      // If the room has no history yet, initialize with a system message
-      setRoomMessages((prev) => {
-        if (prev[roomId]) return prev;
-        return {
-          ...prev,
-          [roomId]: [{
-            id: Date.now(),
-            text: `You joined the ${room.name} room`,
-            sender: "system",
-            room: roomId,
-            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-          }]
-        };
-      });
+      
+      // Ensure we have this room in our global store
+      if (!globalMessageStore[roomId]) {
+        globalMessageStore[roomId] = [{
+          id: Date.now(),
+          text: `You joined the ${room.name} room`,
+          sender: "system",
+          room: roomId,
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        }];
+      }
+      
+      // Make sure our local state is synced with global store
+      setRoomMessages(prev => ({
+        ...prev,
+        [roomId]: [...globalMessageStore[roomId]]
+      }));
 
       if (websocket) {
         websocket.sendMessage({
@@ -172,29 +212,30 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           userId: currentUser.id,
           username: currentUser.username
         });
-        // Add system message for joining room (if not already set above)
-        setTimeout(() => {
-          setRoomMessages((prev) => {
-            const msgs = prev[roomId] || [];
-            // If last system message not for joining, add it
-            if (!msgs.length || msgs[msgs.length - 1].sender !== "system" || !msgs[msgs.length - 1].text.includes("joined the")) {
-              return {
-                ...prev,
-                [roomId]: [
-                  ...msgs,
-                  {
-                    id: Date.now(),
-                    text: `You joined the ${room.name} room`,
-                    sender: "system",
-                    room: roomId,
-                    timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-                  }
-                ]
-              };
-            }
-            return prev;
-          });
-        }, 500);
+        
+        // Add a join message if needed
+        const hasRecentJoinMessage = globalMessageStore[roomId].some(msg => 
+          msg.sender === "system" && 
+          msg.text.includes("joined") && 
+          Date.now() - Number(msg.id) < 5000
+        );
+        
+        if (!hasRecentJoinMessage) {
+          const joinMsg = {
+            id: Date.now(),
+            text: `${currentUser.username} joined the ${room.name} room`,
+            sender: "system",
+            room: roomId,
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+          };
+          
+          globalMessageStore[roomId].push(joinMsg);
+          
+          setRoomMessages(prev => ({
+            ...prev,
+            [roomId]: [...globalMessageStore[roomId]]
+          }));
+        }
       }
     }
   };
@@ -209,8 +250,16 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         users: 1
       };
       setRooms(prev => [...prev, newRoom]);
-      // Add initial empty message list
-      setRoomMessages(prev => ({ ...prev, [newRoomId]: [] }));
+      
+      // Initialize the room in our global store
+      globalMessageStore[newRoomId] = [];
+      
+      // Update our local state
+      setRoomMessages(prev => ({ 
+        ...prev, 
+        [newRoomId]: [] 
+      }));
+      
       joinRoom(newRoomId);
       toast({
         title: "Room Created",
@@ -234,13 +283,19 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       websocket.sendMessage(newMessage);
 
       // Add to the relevant room's message history
-      setRoomMessages((prev) => {
-        const prevMsgs = prev[currentRoom.id] || [];
-        return {
-          ...prev,
-          [currentRoom.id]: [...prevMsgs, newMessage]
-        };
-      });
+      const updatedMessages = [
+        ...(globalMessageStore[currentRoom.id] || []),
+        newMessage
+      ];
+      
+      // Update our global store
+      globalMessageStore[currentRoom.id] = updatedMessages;
+      
+      // Update our local state
+      setRoomMessages((prev) => ({
+        ...prev,
+        [currentRoom.id]: updatedMessages
+      }));
     }
   };
 
@@ -251,7 +306,6 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
     setCurrentUser(null);
     setCurrentRoom(null);
-    setRoomMessages({});
     setIsConnected(false);
   };
 
