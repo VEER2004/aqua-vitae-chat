@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
 import WebSocketService from "../utils/websocket";
 import { useToast } from "@/hooks/use-toast";
@@ -45,7 +44,8 @@ const WS_URL = "wss://echo.websocket.org"; // Example for testing
 export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [websocket, setWebsocket] = useState<WebSocketService | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // Store messages per room
+  const [roomMessages, setRoomMessages] = useState<Record<string, ChatMessage[]>>({});
   const [rooms, setRooms] = useState<Room[]>([
     { id: "general", name: "General", users: 5 },
     { id: "support", name: "Support", users: 2 },
@@ -54,6 +54,9 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const { toast } = useToast();
+
+  // The messages for the current room (derived from roomMessages)
+  const messages = currentRoom?.id && roomMessages[currentRoom.id] ? roomMessages[currentRoom.id] : [];
 
   // Initialize WebSocket connection when a user is set
   useEffect(() => {
@@ -97,21 +100,25 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   // Function to handle incoming WebSocket messages
   const handleIncomingMessage = (data: any) => {
-    // Since we're using echo.websocket.org, it will just echo back our messages
-    // In a real app, you would parse different message types from your server
-    console.log("Received message:", data);
-    
-    // For demo purposes, we'll simulate receiving messages
-    // In a real app, this would come from the server
-    if (data.type === "chat_message" && data.room === currentRoom?.id) {
-      setMessages(prev => [...prev, {
-        id: Date.now(),
-        text: data.text,
-        sender: data.sender,
-        room: data.room,
-        timestamp: data.timestamp,
-        isFormattedText: data.isFormattedText
-      }]);
+    // Simulate receiving messages per room
+    if (data.type === "chat_message" && data.room) {
+      setRoomMessages((prev) => {
+        const prevMsgs = prev[data.room] || [];
+        return {
+          ...prev,
+          [data.room]: [
+            ...prevMsgs,
+            {
+              id: Date.now(),
+              text: data.text,
+              sender: data.sender,
+              room: data.room,
+              timestamp: data.timestamp,
+              isFormattedText: data.isFormattedText
+            }
+          ]
+        };
+      });
     } else if (data.type === "room_update") {
       setRooms(data.rooms);
     }
@@ -122,14 +129,17 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (username.trim()) {
       const userId = `user_${Date.now()}`;
       setCurrentUser({ id: userId, username });
-      // For demo, we'll add a welcome message
-      setMessages([{
-        id: Date.now(),
-        text: `Welcome to the chat, ${username}!`,
-        sender: "system",
-        room: "general",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-      }]);
+      // Add welcome message to "general" history
+      setRoomMessages((prev) => ({
+        ...prev,
+        general: [{
+          id: Date.now(),
+          text: `Welcome to the chat, ${username}!`,
+          sender: "system",
+          room: "general",
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        }]
+      }));
       // Auto-join general room
       joinRoom("general");
     }
@@ -140,9 +150,21 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const room = rooms.find(r => r.id === roomId);
     if (room && currentUser) {
       setCurrentRoom(room);
-      setMessages([]); // Clear messages when changing rooms
-      
-      // Simulate joining room
+      // If the room has no history yet, initialize with a system message
+      setRoomMessages((prev) => {
+        if (prev[roomId]) return prev;
+        return {
+          ...prev,
+          [roomId]: [{
+            id: Date.now(),
+            text: `You joined the ${room.name} room`,
+            sender: "system",
+            room: roomId,
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+          }]
+        };
+      });
+
       if (websocket) {
         websocket.sendMessage({
           type: "join_room",
@@ -150,16 +172,28 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           userId: currentUser.id,
           username: currentUser.username
         });
-        
-        // Simulate receiving a system message
+        // Add system message for joining room (if not already set above)
         setTimeout(() => {
-          setMessages([{
-            id: Date.now(),
-            text: `You joined the ${room.name} room`,
-            sender: "system",
-            room: roomId,
-            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-          }]);
+          setRoomMessages((prev) => {
+            const msgs = prev[roomId] || [];
+            // If last system message not for joining, add it
+            if (!msgs.length || msgs[msgs.length - 1].sender !== "system" || !msgs[msgs.length - 1].text.includes("joined the")) {
+              return {
+                ...prev,
+                [roomId]: [
+                  ...msgs,
+                  {
+                    id: Date.now(),
+                    text: `You joined the ${room.name} room`,
+                    sender: "system",
+                    room: roomId,
+                    timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                  }
+                ]
+              };
+            }
+            return prev;
+          });
         }, 500);
       }
     }
@@ -174,10 +208,10 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         name: roomName,
         users: 1
       };
-      
       setRooms(prev => [...prev, newRoom]);
+      // Add initial empty message list
+      setRoomMessages(prev => ({ ...prev, [newRoomId]: [] }));
       joinRoom(newRoomId);
-      
       toast({
         title: "Room Created",
         description: `You created the room ${roomName}`
@@ -197,11 +231,16 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         isFormattedText
       };
-      
       websocket.sendMessage(newMessage);
-      
-      // Add to our local messages (echo server will send it back too)
-      setMessages(prev => [...prev, newMessage]);
+
+      // Add to the relevant room's message history
+      setRoomMessages((prev) => {
+        const prevMsgs = prev[currentRoom.id] || [];
+        return {
+          ...prev,
+          [currentRoom.id]: [...prevMsgs, newMessage]
+        };
+      });
     }
   };
 
@@ -212,7 +251,7 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
     setCurrentUser(null);
     setCurrentRoom(null);
-    setMessages([]);
+    setRoomMessages({});
     setIsConnected(false);
   };
 
